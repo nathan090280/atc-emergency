@@ -175,14 +175,21 @@ app.post('/api/score', authRequired, async (req, res) => {
     const user = await getUser(username);
     if (!user) return res.status(401).json({ error: 'auth error' });
 
+    // Compute positive delta from previous currentScore for live career increment
+    const prevLive = Number(user.currentScore || 0);
+    const delta = Math.max(0, numericScore - prevLive);
+
     const updates = { currentScore: numericScore };
     // Bump maxSessionScore if current live score exceeds it
     const currentMax = Number(user.maxSessionScore || 0);
     if (numericScore > currentMax) {
       updates.maxSessionScore = numericScore;
     }
+    // Increment careerScore by delta
+    updates.careerScore = Number(user.careerScore || 0) + delta;
+
     await updateUser(username, updates);
-    return res.json({ ok: true });
+    return res.json({ ok: true, careerScore: updates.careerScore });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'server error' });
@@ -213,14 +220,18 @@ app.post('/api/session', authRequired, async (req, res) => {
       newStats[k] = Number(newStats[k] || 0) + Number(s[k] || 0);
     }
 
+    // Reconcile any final delta not captured by realtime updates
+    const prevLive = Number(user.currentScore || 0);
+    const finalDelta = Math.max(0, numericScore - prevLive);
     const updated = {
       sessions,
       stats: newStats,
-      careerScore: Number(user.careerScore || 0) + numericScore,
+      careerScore: Number(user.careerScore || 0) + finalDelta,
       maxSessionScore: Math.max(Number(user.maxSessionScore || 0), numericScore),
+      currentScore: 0, // reset at end of session
     };
     await updateUser(username, updated);
-    return res.json({ ok: true });
+    return res.json({ ok: true, careerScore: updated.careerScore });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'server error' });
