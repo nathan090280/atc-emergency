@@ -1,4 +1,4 @@
-// ATC Emergency Backend - Auth, Leaderboards, Sessions (Firebase version)
+// ATC Emergency Backend - Auth, Leaderboards, Sessions
 // Run: node server.js
 
 const express = require('express');
@@ -10,23 +10,36 @@ const admin = require('firebase-admin');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
-
-// --- Firebase setup ---
-// You need a Firebase service account JSON and set the path in FIREBASE_SERVICE_ACCOUNT env variable
-// Or you can paste the JSON contents as an environment variable and parse it
-const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
-  ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-  : require('./serviceAccountKey.json');
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: 'https://atc-emergency-default-rtdb.europe-west1.firebasedatabase.app/'
-});
-
-const dbRef = admin.database().ref('/users');
+// Firebase Realtime Database URL (required for production). Defaults to provided project.
+const FIREBASE_DATABASE_URL = process.env.FIREBASE_DATABASE_URL || 'https://atc-emergency-default-rtdb.europe-west1.firebasedatabase.app';
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+// --- Firebase initialization ---
+// Expect either FIREBASE_SERVICE_ACCOUNT_JSON env var or Application Default Credentials.
+if (!admin.apps.length) {
+  try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: FIREBASE_DATABASE_URL,
+      });
+    } else {
+      // For local development: set GOOGLE_APPLICATION_CREDENTIALS to a service account file
+      admin.initializeApp({
+        credential: admin.credential.applicationDefault(),
+        databaseURL: FIREBASE_DATABASE_URL,
+      });
+    }
+    console.log('Firebase initialized with DB:', FIREBASE_DATABASE_URL);
+  } catch (e) {
+    console.error('Failed to initialize Firebase Admin SDK:', e);
+  }
+}
+const rtdb = admin.database();
+const usersRef = rtdb.ref('users');
 
 function defaultStats() {
   return {
@@ -40,8 +53,24 @@ function defaultStats() {
   };
 }
 
+// --- DB helper functions (Firebase) ---
+async function getUser(username) {
+  const snap = await usersRef.child(username).once('value');
+  return snap.val() || null;
+}
+async function setUser(username, data) {
+  await usersRef.child(username).set(data);
+}
+async function updateUser(username, data) {
+  await usersRef.child(username).update(data);
+}
+async function getAllUsers() {
+  const snap = await usersRef.once('value');
+  return snap.val() || {};
+}
+
 // --- Auth middleware ---
-async function authRequired(req, res, next) {
+function authRequired(req, res, next) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (!token) return res.status(401).json({ error: 'Missing token' });
@@ -62,17 +91,18 @@ app.post('/api/signup', async (req, res) => {
     if (!username || !password) return res.status(400).json({ error: 'username and password required' });
     if (!/^[A-Za-z0-9_\-]{3,20}$/.test(username)) return res.status(400).json({ error: 'invalid username' });
 
-    const snapshot = await dbRef.child(username).get();
-    if (snapshot.exists()) return res.status(409).json({ error: 'username exists' });
+    const existing = await getUser(username);
+    if (existing) return res.status(409).json({ error: 'username exists' });
 
     const passwordHash = await bcrypt.hash(password, 10);
-    await dbRef.child(username).set({
+    const userDoc = {
       passwordHash,
       careerScore: 0,
       stats: defaultStats(),
       sessions: [],
       maxSessionScore: 0,
-    });
+    };
+    await setUser(username, userDoc);
 
     const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '30d' });
     return res.json({ username, token });
@@ -86,13 +116,10 @@ app.post('/api/login', async (req, res) => {
   try {
     const username = String((req.body.username || '')).trim();
     const password = String(req.body.password || '');
-    const snapshot = await dbRef.child(username).get();
-    const user = snapshot.val();
+    const user = await getUser(username);
     if (!user) return res.status(401).json({ error: 'invalid credentials' });
-
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: 'invalid credentials' });
-
     const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '30d' });
     return res.json({ username, token });
   } catch (e) {
@@ -104,9 +131,8 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/leaderboards/sessionTop', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 20));
-    const snapshot = await dbRef.get();
-    const users = snapshot.val() || {};
-    const rows = Object.entries(users).map(([username, u]) => ({ username, score: u.maxSessionScore || 0 }));
+    const users = await getAllUsers();
+    const rows = Object.entries(users).map(([username, u]) => ({ username, score: (u && u.maxSessionScore) || 0 }));
     rows.sort((a, b) => b.score - a.score);
     return res.json({ results: rows.slice(0, limit) });
   } catch (e) {
@@ -118,9 +144,8 @@ app.get('/api/leaderboards/sessionTop', async (req, res) => {
 app.get('/api/leaderboards/careerTop', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 20));
-    const snapshot = await dbRef.get();
-    const users = snapshot.val() || {};
-    const rows = Object.entries(users).map(([username, u]) => ({ username, careerScore: u.careerScore || 0 }));
+    const users = await getAllUsers();
+    const rows = Object.entries(users).map(([username, u]) => ({ username, careerScore: (u && u.careerScore) || 0 }));
     rows.sort((a, b) => b.careerScore - a.careerScore);
     return res.json({ results: rows.slice(0, limit) });
   } catch (e) {
@@ -132,8 +157,7 @@ app.get('/api/leaderboards/careerTop', async (req, res) => {
 app.get('/api/stats/:username', async (req, res) => {
   try {
     const username = req.params.username;
-    const snapshot = await dbRef.child(username).get();
-    const user = snapshot.val();
+    const user = await getUser(username);
     if (!user) return res.status(404).json({ error: 'not found' });
     return res.json({ username, careerScore: user.careerScore || 0, stats: user.stats || defaultStats() });
   } catch (e) {
@@ -146,37 +170,33 @@ app.post('/api/session', authRequired, async (req, res) => {
   try {
     const { score, stats, startedAt, endedAt, durationMs } = req.body || {};
     const username = req.user.username;
-
-    const snapshot = await dbRef.child(username).get();
-    const user = snapshot.val();
+    const user = await getUser(username);
     if (!user) return res.status(401).json({ error: 'auth error' });
 
-    // Append session
-    const newSession = {
-      score: Number(score) || 0,
+    const sessions = Array.isArray(user.sessions) ? user.sessions.slice() : [];
+    const numericScore = Number(score) || 0;
+    sessions.push({
+      score: numericScore,
       durationMs: Number(durationMs) || 0,
       startedAt: startedAt || new Date().toISOString(),
       endedAt: endedAt || new Date().toISOString(),
-    };
-    const updatedSessions = [...(user.sessions || []), newSession];
+    });
 
     // Update aggregates
     const s = stats || {};
     const keys = Object.keys(defaultStats());
-    const newStats = user.stats || defaultStats();
+    const newStats = Object.assign({}, defaultStats(), user.stats || {});
     for (const k of keys) {
       newStats[k] = Number(newStats[k] || 0) + Number(s[k] || 0);
     }
 
-    const numericScore = Number(score) || 0;
-    const updatedData = {
-      sessions: updatedSessions,
+    const updated = {
+      sessions,
       stats: newStats,
       careerScore: Number(user.careerScore || 0) + numericScore,
       maxSessionScore: Math.max(Number(user.maxSessionScore || 0), numericScore),
     };
-
-    await dbRef.child(username).update(updatedData);
+    await updateUser(username, updated);
     return res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -185,7 +205,7 @@ app.post('/api/session', authRequired, async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ ok: true, service: 'ATC Emergency Backend (Firebase)' });
+  res.json({ ok: true, service: 'ATC Emergency Backend' });
 });
 
 app.listen(PORT, () => {
