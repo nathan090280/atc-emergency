@@ -132,7 +132,18 @@ app.get('/api/leaderboards/sessionTop', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 20));
     const users = await getAllUsers();
-    const rows = Object.entries(users).map(([username, u]) => ({ username, score: (u && u.maxSessionScore) || 0 }));
+    const rows = Object.entries(users).map(([username, u]) => {
+      const sessions = (u && Array.isArray(u.sessions)) ? u.sessions : [];
+      let best = null;
+      for (const sess of sessions) {
+        if (!best || Number(sess.score || 0) > Number(best.score || 0)) best = sess;
+      }
+      return {
+        username,
+        score: (u && u.maxSessionScore) || 0,
+        sessionStats: (best && best.stats) ? best.stats : null,
+      };
+    });
     rows.sort((a, b) => b.score - a.score);
     return res.json({ results: rows.slice(0, limit) });
   } catch (e) {
@@ -145,7 +156,11 @@ app.get('/api/leaderboards/careerTop', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 20));
     const users = await getAllUsers();
-    const rows = Object.entries(users).map(([username, u]) => ({ username, careerScore: (u && u.careerScore) || 0 }));
+    const rows = Object.entries(users).map(([username, u]) => ({
+      username,
+      careerScore: (u && u.careerScore) || 0,
+      careerStats: (u && u.stats) ? u.stats : defaultStats(),
+    }));
     rows.sort((a, b) => b.careerScore - a.careerScore);
     return res.json({ results: rows.slice(0, limit) });
   } catch (e) {
@@ -205,15 +220,20 @@ app.post('/api/session', authRequired, async (req, res) => {
 
     const sessions = Array.isArray(user.sessions) ? user.sessions.slice() : [];
     const numericScore = Number(score) || 0;
+    // sanitize provided stats to numeric values for known keys
+    const s = stats || {};
+    const statKeys = Object.keys(defaultStats());
+    const sessStats = {};
+    for (const k of statKeys) sessStats[k] = Number(s[k] || 0);
     sessions.push({
       score: numericScore,
       durationMs: Number(durationMs) || 0,
       startedAt: startedAt || new Date().toISOString(),
       endedAt: endedAt || new Date().toISOString(),
+      stats: sessStats,
     });
 
     // Update aggregates
-    const s = stats || {};
     const keys = Object.keys(defaultStats());
     const newStats = Object.assign({}, defaultStats(), user.stats || {});
     for (const k of keys) {
