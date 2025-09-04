@@ -166,6 +166,29 @@ app.get('/api/stats/:username', async (req, res) => {
   }
 });
 
+// Realtime score update: record user's current live score without altering career aggregates.
+app.post('/api/score', authRequired, async (req, res) => {
+  try {
+    const username = req.user.username;
+    const { score } = req.body || {};
+    const numericScore = Number(score) || 0;
+    const user = await getUser(username);
+    if (!user) return res.status(401).json({ error: 'auth error' });
+
+    const updates = { currentScore: numericScore };
+    // Bump maxSessionScore if current live score exceeds it
+    const currentMax = Number(user.maxSessionScore || 0);
+    if (numericScore > currentMax) {
+      updates.maxSessionScore = numericScore;
+    }
+    await updateUser(username, updates);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'server error' });
+  }
+});
+
 app.post('/api/session', authRequired, async (req, res) => {
   try {
     const { score, stats, startedAt, endedAt, durationMs } = req.body || {};
