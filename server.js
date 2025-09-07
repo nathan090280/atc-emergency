@@ -185,7 +185,7 @@ app.get('/api/stats/:username', async (req, res) => {
 app.post('/api/score', authRequired, async (req, res) => {
   try {
     const username = req.user.username;
-    const { score } = req.body || {};
+    const { score, statsDelta } = req.body || {};
     const numericScore = Number(score) || 0;
     const user = await getUser(username);
     if (!user) return res.status(401).json({ error: 'auth error' });
@@ -203,8 +203,21 @@ app.post('/api/score', authRequired, async (req, res) => {
     // Increment careerScore by delta
     updates.careerScore = Number(user.careerScore || 0) + delta;
 
+    // Optionally, increment aggregate stats by provided deltas
+    if (statsDelta && typeof statsDelta === 'object') {
+      const currentStats = Object.assign({}, defaultStats(), user.stats || {});
+      const keys = Object.keys(defaultStats());
+      for (const k of keys) {
+        const inc = Number(statsDelta[k] || 0);
+        if (!isNaN(inc) && inc !== 0) {
+          currentStats[k] = Number(currentStats[k] || 0) + inc;
+        }
+      }
+      updates.stats = currentStats;
+    }
+
     await updateUser(username, updates);
-    return res.json({ ok: true, careerScore: updates.careerScore });
+    return res.json({ ok: true, careerScore: updates.careerScore, stats: updates.stats || (user.stats || defaultStats()) });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'server error' });
